@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- الاتصال بسيرفر النظام على الشبكة المحلية فقط -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <application
+        android:allowBackup="true"
+        android:label="سبارك - متابعة"
+        android:icon="@drawable/ic_launcher"
+        android:theme="@style/Theme.SparkCompanion"
+        android:usesCleartextTraffic="true">
+        <!-- usesCleartextTraffic مطلوبة لأن سيرفر النظام يعمل بـ HTTP عادي على الشبكة المحلية (بدون شهادة) -->
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:theme="@style/Theme.SparkCompanion">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

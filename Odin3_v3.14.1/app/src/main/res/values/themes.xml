@@ -1,0 +1,3 @@
+<resources>
+    <style name="Theme.SparkCompanion" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

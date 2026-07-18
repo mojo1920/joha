@@ -51,10 +51,16 @@ data class ProductItem(
     val quantity: Double, val minQty: Double, val unit: String,
     val costPrice: Double, val sellPrice: Double, val rollLength: Double, val rollPrice: Double,
 )
+data class ClosingReport(val invoiceCount: Int, val salesTotal: Double, val profit: Double, val cash: Double, val card: Double, val transfer: Double, val credit: Double)
+data class DayClosingStatus(val date: String, val closed: Boolean, val report: ClosingReport, val cashInDrawer: Double?, val expenses: Double?, val note: String)
+data class MonthClosingStatus(val month: String, val closed: Boolean, val report: ClosingReport)
+
 data class InvoiceLineItem(val name: String, val unit: String, val qty: Double, val price: Double)
 data class InvoiceSummaryItem(
     val id: String, val number: String, val customerName: String, val total: Double,
     val paymentMethod: String, val date: String, val items: List<InvoiceLineItem>,
+    val subtotal: Double = 0.0, val discount: Double = 0.0,
+    val creditStatus: String = "", val remaining: Double = 0.0,
 )
 data class DayPoint(val date: String, val total: Double)
 data class LowStockRow(val name: String, val quantity: Double, val minQty: Double)
@@ -134,6 +140,43 @@ class SparkApiClient(private val context: Context) {
             ApiResult.Failure("عنوان الـIP أو المنفذ غير صحيح")
         }
     }
+
+    private suspend fun authedBody(path: String, method: String, jsonBody: JSONObject?): ApiResult<JSONObject> = withContext(Dispatchers.IO) {
+        val ip = SessionStore.ip(context) ?: return@withContext ApiResult.Failure("غير مقترن بعد")
+        val port = SessionStore.port(context)
+        val token = SessionStore.token(context) ?: return@withContext ApiResult.Failure("غير مقترن بعد")
+        try {
+            val mediaType = "application/json; charset=utf-8".toMediaType()
+            val body = (jsonBody ?: JSONObject()).toString().toRequestBody(mediaType)
+            val builder = Request.Builder().url("${baseUrl(ip, port)}$path").addHeader("Authorization", "Bearer $token")
+            when (method) {
+                "POST" -> builder.post(body)
+                "PUT" -> builder.put(body)
+                "DELETE" -> builder.delete(body)
+            }
+            client.newCall(builder.build()).execute().use { resp ->
+                val text = resp.body?.string() ?: "{}"
+                val json = try { JSONObject(text) } catch (e: Exception) { JSONObject() }
+                if (resp.code == 401) return@withContext ApiResult.Failure("انتهى الاقتران، أعد الربط من الإعدادات")
+                if (!resp.isSuccessful) return@withContext ApiResult.Failure(json.optString("error").takeIf { it.isNotBlank() } ?: "تعذّرت العملية (${resp.code})")
+                ApiResult.Success(json)
+            }
+        } catch (e: IOException) {
+            ApiResult.Failure("تعذّر الوصول للكمبيوتر — تأكد إنك على نفس شبكة الواي فاي")
+        }
+    }
+
+    suspend fun addInventoryItem(name: String, barcode: String, category: String, quantity: Double, minQty: Double, unit: String, sellPrice: Double): ApiResult<JSONObject> =
+        authedBody("/api/inventory", "POST", JSONObject().apply {
+            put("name", name); put("barcode", barcode); put("category", category)
+            put("quantity", quantity); put("minQty", minQty); put("unit", unit); put("sellPrice", sellPrice)
+        })
+
+    suspend fun editInventoryQuantity(id: String, newQuantity: Double): ApiResult<JSONObject> =
+        authedBody("/api/inventory/$id", "PUT", JSONObject().apply { put("quantity", newQuantity) })
+
+    suspend fun deleteInventoryItem(id: String): ApiResult<JSONObject> =
+        authedBody("/api/inventory/$id", "DELETE", null)
 
     suspend fun getSummary(): ApiResult<DashboardSummary> = when (val r = authedGet("/api/summary")) {
         is ApiResult.Success -> {
@@ -217,6 +260,10 @@ class SparkApiClient(private val context: Context) {
                     paymentMethod = o.optString("paymentMethod", ""),
                     date = o.optString("date", ""),
                     items = lineItems,
+                    subtotal = o.optDouble("subtotal", 0.0),
+                    discount = o.optDouble("discount", 0.0),
+                    creditStatus = o.optString("creditStatus", ""),
+                    remaining = o.optDouble("remaining", 0.0),
                 )
             }
             ApiResult.Success(list)
@@ -236,11 +283,13 @@ class SparkApiClient(private val context: Context) {
                     .addHeader("Authorization", "Bearer $token").build()
                 longClient.newCall(req).execute().use { resp ->
                     if (resp.code == 401) return@withContext ApiResult.Failure("انتهى الاقتران، أعد الربط من الإعدادات")
-                    if (resp.code == 503) {
-                        val msg = try { JSONObject(resp.body?.string() ?: "{}").optString("error") } catch (e: Exception) { null }
-                        return@withContext ApiResult.Failure(msg?.takeIf { it.isNotBlank() } ?: "افتح نظام سبارك على الكمبيوتر أولًا")
+                    if (!resp.isSuccessful) {
+                        val bodyText = try { resp.body?.string() } catch (e: Exception) { null }
+                        val msg = try { bodyText?.let { JSONObject(it).optString("error") } } catch (e: Exception) { null }
+                        return@withContext ApiResult.Failure(
+                            msg?.takeIf { it.isNotBlank() } ?: "تعذّر تحميل الملف (${resp.code})"
+                        )
                     }
-                    if (!resp.isSuccessful) return@withContext ApiResult.Failure("تعذّر تحميل الملف (${resp.code})")
                     val bytes = resp.body?.bytes() ?: return@withContext ApiResult.Failure("ملف فارغ")
 
                     val resolver = context.contentResolver
@@ -258,4 +307,66 @@ class SparkApiClient(private val context: Context) {
                 ApiResult.Failure("تعذّر الوصول للكمبيوتر — تأكد إنك على نفس شبكة الواي فاي")
             }
         }
+
+    private fun parseReport(o: JSONObject): ClosingReport {
+        val pb = o.optJSONObject("paymentBreakdown") ?: JSONObject()
+        return ClosingReport(
+            invoiceCount = o.optInt("invoiceCount", 0),
+            salesTotal = o.optDouble("salesTotal", 0.0),
+            profit = o.optDouble("profit", 0.0),
+            cash = pb.optDouble("cash", 0.0), card = pb.optDouble("card", 0.0),
+            transfer = pb.optDouble("transfer", 0.0), credit = pb.optDouble("credit", 0.0),
+        )
+    }
+
+    suspend fun getDayClosing(date: String): ApiResult<DayClosingStatus> = when (val r = authedGet("/api/closing/day?date=$date")) {
+        is ApiResult.Success -> {
+            val d = r.data
+            val details = d.optJSONObject("details")
+            ApiResult.Success(DayClosingStatus(
+                date = d.optString("date", date), closed = d.optBoolean("closed", false),
+                report = parseReport(d.optJSONObject("report") ?: JSONObject()),
+                cashInDrawer = details?.let { if (it.isNull("cashInDrawer")) null else it.optDouble("cashInDrawer") },
+                expenses = details?.let { if (it.isNull("expenses")) null else it.optDouble("expenses") },
+                note = details?.optString("note", "") ?: "",
+            ))
+        }
+        is ApiResult.Failure -> r
+    }
+
+    suspend fun closeDay(date: String, cashInDrawer: Double?, expenses: Double?, note: String): ApiResult<JSONObject> =
+        authedBody("/api/closing/day", "POST", JSONObject().apply {
+            put("date", date); put("cashInDrawer", cashInDrawer ?: JSONObject.NULL); put("expenses", expenses ?: JSONObject.NULL); put("note", note)
+        })
+
+    suspend fun reopenDay(date: String): ApiResult<JSONObject> =
+        authedBody("/api/closing/day/reopen", "POST", JSONObject().apply { put("date", date) })
+
+    suspend fun getMonthClosing(month: String): ApiResult<MonthClosingStatus> = when (val r = authedGet("/api/closing/month?month=$month")) {
+        is ApiResult.Success -> {
+            val d = r.data
+            ApiResult.Success(MonthClosingStatus(
+                month = d.optString("month", month), closed = d.optBoolean("closed", false),
+                report = parseReport(d.optJSONObject("report") ?: JSONObject()),
+            ))
+        }
+        is ApiResult.Failure -> r
+    }
+
+    suspend fun closeMonth(month: String): ApiResult<JSONObject> =
+        authedBody("/api/closing/month", "POST", JSONObject().apply { put("month", month) })
+
+    suspend fun reopenMonth(month: String): ApiResult<JSONObject> =
+        authedBody("/api/closing/month/reopen", "POST", JSONObject().apply { put("month", month) })
+
+    suspend fun getClosingHistory(): ApiResult<Pair<List<String>, List<String>>> = when (val r = authedGet("/api/closing/history")) {
+        is ApiResult.Success -> {
+            val days = r.data.optJSONArray("closedDays") ?: JSONArray()
+            val months = r.data.optJSONArray("closedMonths") ?: JSONArray()
+            ApiResult.Success(
+                (0 until days.length()).map { days.getString(it) } to (0 until months.length()).map { months.getString(it) }
+            )
+        }
+        is ApiResult.Failure -> r
+    }
 }

@@ -7,6 +7,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -148,7 +150,7 @@ fun PairingScreen(onPaired: () -> Unit) {
 }
 
 /* ---------------------------------- الشاشة الرئيسية بعد الاقتران ---------------------------------- */
-enum class CompanionTab { DASHBOARD, INVENTORY, INVOICES }
+enum class CompanionTab { DASHBOARD, INVENTORY, INVOICES, CLOSING }
 
 @Composable
 fun DashboardHost(onUnpair: () -> Unit) {
@@ -191,6 +193,13 @@ fun DashboardHost(onUnpair: () -> Unit) {
                     label = { Text("الفواتير") },
                     colors = NavigationBarItemDefaults.colors(selectedIconColor = SparkAccentDark, selectedTextColor = SparkAccentDark, indicatorColor = SparkAccentSoft)
                 )
+                NavigationBarItem(
+                    selected = tab == CompanionTab.CLOSING,
+                    onClick = { tab = CompanionTab.CLOSING },
+                    icon = { Icon(Icons.Default.Lock, contentDescription = null) },
+                    label = { Text("الإقفال") },
+                    colors = NavigationBarItemDefaults.colors(selectedIconColor = SparkAccentDark, selectedTextColor = SparkAccentDark, indicatorColor = SparkAccentSoft)
+                )
             }
         }
     ) { padding ->
@@ -199,6 +208,7 @@ fun DashboardHost(onUnpair: () -> Unit) {
                 CompanionTab.DASHBOARD -> DashboardScreen()
                 CompanionTab.INVENTORY -> InventoryScreen()
                 CompanionTab.INVOICES -> InvoicesScreen()
+                CompanionTab.CLOSING -> ClosingScreen()
             }
         }
     }
@@ -329,24 +339,31 @@ enum class StockFilter { ALL, LOW, OUT }
 @Composable
 fun InventoryScreen() {
     val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
     var items: List<ProductItem> by remember { mutableStateOf(emptyList()) }
     var error: String? by remember { mutableStateOf(null) }
     var query by remember { mutableStateOf("") }
     var stockFilter by remember { mutableStateOf(StockFilter.ALL) }
-    var category by remember { mutableStateOf("الكل") }
+    var category by remember { mutableStateOf("كل الأصناف") }
+    var showAddDialog by remember { mutableStateOf(false) }
+    var deleteTarget: ProductItem? by remember { mutableStateOf(null) }
+    var busyId: String? by remember { mutableStateOf(null) }
 
-    LaunchedEffect(Unit) {
-        when (val r = SparkApiClient(context).getInventory()) {
-            is ApiResult.Success -> items = r.data
-            is ApiResult.Failure -> error = r.message
+    fun reload() {
+        scope.launch {
+            when (val r = SparkApiClient(context).getInventory()) {
+                is ApiResult.Success -> { items = r.data; error = null }
+                is ApiResult.Failure -> error = r.message
+            }
         }
     }
+    LaunchedEffect(Unit) { reload() }
 
-    val categories = remember(items) { listOf("الكل") + items.map { it.category }.filter { it.isNotBlank() }.distinct() }
+    val categories = remember(items) { listOf("كل الأصناف") + items.map { it.category }.filter { it.isNotBlank() }.distinct() }
 
     val filtered = items.filter { p ->
         val matchesQuery = query.isBlank() || p.name.contains(query, ignoreCase = true) || p.barcode.contains(query, ignoreCase = true)
-        val matchesCategory = category == "الكل" || p.category == category
+        val matchesCategory = category == "كل الأصناف" || p.category == category
         val matchesStock = when (stockFilter) {
             StockFilter.ALL -> true
             StockFilter.LOW -> p.quantity <= p.minQty && p.quantity > 0
@@ -355,6 +372,7 @@ fun InventoryScreen() {
         matchesQuery && matchesCategory && matchesStock
     }
 
+    Box(modifier = Modifier.fillMaxSize()) {
     Column(modifier = Modifier.fillMaxSize()) {
         error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
 
@@ -383,10 +401,11 @@ fun InventoryScreen() {
         }
 
         LazyColumn(modifier = Modifier.padding(horizontal = 12.dp)) {
-            items(filtered) { p ->
+            items(filtered, key = { it.id }) { p ->
                 val out = p.quantity <= 0
                 val low = !out && p.quantity <= p.minQty
                 val bg = when { out -> MaterialTheme.colorScheme.errorContainer; low -> MaterialTheme.colorScheme.tertiaryContainer; else -> MaterialTheme.colorScheme.surface }
+                val isBusy = busyId == p.id
                 Card(
                     colors = CardDefaults.cardColors(containerColor = bg),
                     modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
@@ -398,22 +417,305 @@ fun InventoryScreen() {
                                 if (p.category.isNotBlank()) Text(p.category, style = MaterialTheme.typography.bodySmall)
                                 if (p.barcode.isNotBlank()) Text(p.barcode, style = MaterialTheme.typography.bodySmall)
                             }
-                            Text(
-                                "${p.quantity} ${p.unit}",
-                                color = if (out) MaterialTheme.colorScheme.error else if (low) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary,
-                                fontWeight = FontWeight.Bold
-                            )
+                            IconButton(onClick = { deleteTarget = p }, enabled = !isBusy) {
+                                Icon(Icons.Default.Delete, contentDescription = "حذف الصنف", tint = MaterialTheme.colorScheme.error)
+                            }
                         }
                         Spacer(Modifier.height(6.dp))
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                             Text("سعر البيع: ${"%.2f".format(p.sellPrice)}", style = MaterialTheme.typography.bodySmall)
                             if (p.rollLength > 0) Text("اللفة: ${"%.2f".format(p.rollPrice)} (${p.rollLength} م)", style = MaterialTheme.typography.bodySmall)
                         }
+                        Spacer(Modifier.height(8.dp))
+                        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                OutlinedButton(onClick = {
+                                    val next = (p.quantity - 1).coerceAtLeast(0.0)
+                                    busyId = p.id
+                                    scope.launch {
+                                        when (SparkApiClient(context).editInventoryQuantity(p.id, next)) {
+                                            is ApiResult.Success -> reload()
+                                            is ApiResult.Failure -> {}
+                                        }
+                                        busyId = null
+                                    }
+                                }, enabled = !isBusy, contentPadding = PaddingValues(8.dp)) { Text("−") }
+                                Text(
+                                    "  ${p.quantity} ${p.unit}  ",
+                                    color = if (out) MaterialTheme.colorScheme.error else if (low) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                OutlinedButton(onClick = {
+                                    busyId = p.id
+                                    scope.launch {
+                                        when (SparkApiClient(context).editInventoryQuantity(p.id, p.quantity + 1)) {
+                                            is ApiResult.Success -> reload()
+                                            is ApiResult.Failure -> {}
+                                        }
+                                        busyId = null
+                                    }
+                                }, enabled = !isBusy, contentPadding = PaddingValues(8.dp)) { Text("+") }
+                            }
+                            if (isBusy) CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                        }
                     }
                 }
             }
         }
     }
+    FloatingActionButton(
+        onClick = { showAddDialog = true },
+        modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp)
+    ) { Icon(Icons.Default.Add, contentDescription = "إضافة صنف") }
+    }
+
+    if (showAddDialog) {
+        AddInventoryItemDialog(
+            onDismiss = { showAddDialog = false },
+            onSave = { name, barcode, cat, qty, minQty, unit, sellPrice ->
+                scope.launch {
+                    when (val r = SparkApiClient(context).addInventoryItem(name, barcode, cat, qty, minQty, unit, sellPrice)) {
+                        is ApiResult.Success -> { showAddDialog = false; reload() }
+                        is ApiResult.Failure -> error = r.message
+                    }
+                }
+            }
+        )
+    }
+
+    deleteTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { deleteTarget = null },
+            title = { Text("حذف الصنف") },
+            text = { Text("متأكد إنك عايز تحذف \"${target.name}\"؟") },
+            confirmButton = {
+                TextButton(onClick = {
+                    val id = target.id
+                    deleteTarget = null
+                    scope.launch {
+                        when (SparkApiClient(context).deleteInventoryItem(id)) {
+                            is ApiResult.Success -> reload()
+                            is ApiResult.Failure -> {}
+                        }
+                    }
+                }) { Text("حذف", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("إلغاء") } }
+        )
+    }
+}
+
+@Composable
+fun AddInventoryItemDialog(
+    onDismiss: () -> Unit,
+    onSave: (name: String, barcode: String, category: String, quantity: Double, minQty: Double, unit: String, sellPrice: Double) -> Unit,
+) {
+    var name by remember { mutableStateOf("") }
+    var barcode by remember { mutableStateOf("") }
+    var category by remember { mutableStateOf("") }
+    var quantity by remember { mutableStateOf("") }
+    var minQty by remember { mutableStateOf("5") }
+    var unit by remember { mutableStateOf("قطعة") }
+    var sellPrice by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("إضافة صنف جديد") },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("اسم الصنف *") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(6.dp))
+                OutlinedTextField(value = barcode, onValueChange = { barcode = it }, label = { Text("الباركود") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(6.dp))
+                OutlinedTextField(value = category, onValueChange = { category = it }, label = { Text("الفئة") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(6.dp))
+                OutlinedTextField(value = quantity, onValueChange = { quantity = it }, label = { Text("الكمية") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(6.dp))
+                OutlinedTextField(value = minQty, onValueChange = { minQty = it }, label = { Text("حد النواقص") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(6.dp))
+                OutlinedTextField(value = unit, onValueChange = { unit = it }, label = { Text("الوحدة") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(6.dp))
+                OutlinedTextField(value = sellPrice, onValueChange = { sellPrice = it }, label = { Text("سعر البيع") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                onSave(
+                    name.trim(), barcode.trim(), category.trim(),
+                    quantity.toDoubleOrNull() ?: 0.0, minQty.toDoubleOrNull() ?: 5.0,
+                    unit.trim().ifBlank { "قطعة" }, sellPrice.toDoubleOrNull() ?: 0.0,
+                )
+            }, enabled = name.isNotBlank()) { Text("إضافة") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("إلغاء") } }
+    )
+}
+
+@Composable
+fun ClosingScreen() {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    val todayStr = remember { java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date()) }
+    val monthStr = remember { todayStr.substring(0, 7) }
+
+    var dayStatus: DayClosingStatus? by remember { mutableStateOf(null) }
+    var monthStatus: MonthClosingStatus? by remember { mutableStateOf(null) }
+    var history: Pair<List<String>, List<String>> by remember { mutableStateOf(emptyList<String>() to emptyList<String>()) }
+    var error: String? by remember { mutableStateOf(null) }
+    var busy by remember { mutableStateOf(false) }
+    var showCloseDayDialog by remember { mutableStateOf(false) }
+
+    fun reload() {
+        scope.launch {
+            val client = SparkApiClient(context)
+            when (val r = client.getDayClosing(todayStr)) { is ApiResult.Success -> dayStatus = r.data; is ApiResult.Failure -> error = r.message }
+            when (val r = client.getMonthClosing(monthStr)) { is ApiResult.Success -> monthStatus = r.data; is ApiResult.Failure -> {} }
+            when (val r = client.getClosingHistory()) { is ApiResult.Success -> history = r.data; is ApiResult.Failure -> {} }
+        }
+    }
+    LaunchedEffect(Unit) { reload() }
+
+    fun reportRows(rep: ClosingReport): List<Pair<String, String>> = listOf(
+        "عدد الفواتير" to "${rep.invoiceCount}",
+        "إجمالي المبيعات" to "%.2f".format(rep.salesTotal),
+        "الربح" to "%.2f".format(rep.profit),
+        "نقدًا" to "%.2f".format(rep.cash),
+        "بطاقة" to "%.2f".format(rep.card),
+        "حوالة" to "%.2f".format(rep.transfer),
+        "آجل" to "%.2f".format(rep.credit),
+    )
+
+    Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
+        error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(bottom = 8.dp)) }
+
+        Text("الإقفال اليومي", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(4.dp))
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text(todayStr, style = MaterialTheme.typography.bodyMedium)
+                    val closed = dayStatus?.closed == true
+                    Text(if (closed) "مُقفل" else "مفتوح", color = if (closed) SparkCash else SparkAccentDark, fontWeight = FontWeight.Bold)
+                }
+                Spacer(Modifier.height(8.dp)); HorizontalDivider(); Spacer(Modifier.height(8.dp))
+                dayStatus?.let { st ->
+                    reportRows(st.report).forEach { (label, value) ->
+                        Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text(label, style = MaterialTheme.typography.bodySmall); Text(value, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    if (st.closed && (st.cashInDrawer != null || st.expenses != null || st.note.isNotBlank())) {
+                        Spacer(Modifier.height(6.dp)); HorizontalDivider(); Spacer(Modifier.height(6.dp))
+                        st.cashInDrawer?.let { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text("الكاش في الدرج", style = MaterialTheme.typography.bodySmall); Text("%.2f".format(it), style = MaterialTheme.typography.bodySmall) } }
+                        st.expenses?.let { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text("المصروفات", style = MaterialTheme.typography.bodySmall); Text("%.2f".format(it), style = MaterialTheme.typography.bodySmall) } }
+                        if (st.note.isNotBlank()) Text("ملاحظة: ${st.note}", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                Button(
+                    onClick = {
+                        if (dayStatus?.closed == true) {
+                            busy = true
+                            scope.launch { SparkApiClient(context).reopenDay(todayStr); busy = false; reload() }
+                        } else {
+                            showCloseDayDialog = true
+                        }
+                    },
+                    enabled = !busy,
+                    colors = if (dayStatus?.closed == true) ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer) else ButtonDefaults.buttonColors(containerColor = SparkAccentDark),
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text(if (dayStatus?.closed == true) "إعادة فتح اليوم" else "إقفال اليوم") }
+            }
+        }
+
+        Spacer(Modifier.height(20.dp))
+        Text("الإقفال الشهري", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(4.dp))
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text(monthStr, style = MaterialTheme.typography.bodyMedium)
+                    val closed = monthStatus?.closed == true
+                    Text(if (closed) "مُقفل" else "مفتوح", color = if (closed) SparkCash else SparkAccentDark, fontWeight = FontWeight.Bold)
+                }
+                Spacer(Modifier.height(8.dp)); HorizontalDivider(); Spacer(Modifier.height(8.dp))
+                monthStatus?.let { st -> reportRows(st.report).forEach { (label, value) ->
+                    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(label, style = MaterialTheme.typography.bodySmall); Text(value, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
+                    }
+                } }
+                Spacer(Modifier.height(10.dp))
+                Button(
+                    onClick = {
+                        busy = true
+                        scope.launch {
+                            val client = SparkApiClient(context)
+                            if (monthStatus?.closed == true) client.reopenMonth(monthStr) else client.closeMonth(monthStr)
+                            busy = false; reload()
+                        }
+                    },
+                    enabled = !busy,
+                    colors = if (monthStatus?.closed == true) ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer) else ButtonDefaults.buttonColors(containerColor = SparkAccentDark),
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text(if (monthStatus?.closed == true) "إعادة فتح الشهر" else "إقفال الشهر") }
+            }
+        }
+
+        if (history.first.isNotEmpty() || history.second.isNotEmpty()) {
+            Spacer(Modifier.height(20.dp))
+            Text("سجل الإقفال", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(6.dp))
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    if (history.first.isNotEmpty()) {
+                        Text("أيام مُقفلة", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
+                        history.first.take(10).forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    if (history.second.isNotEmpty()) {
+                        Text("أشهر مُقفلة", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
+                        history.second.take(10).forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
+                    }
+                }
+            }
+        }
+    }
+
+    if (showCloseDayDialog) {
+        CloseDayDialog(
+            onDismiss = { showCloseDayDialog = false },
+            onConfirm = { cash, expenses, note ->
+                showCloseDayDialog = false
+                busy = true
+                scope.launch { SparkApiClient(context).closeDay(todayStr, cash, expenses, note); busy = false; reload() }
+            }
+        )
+    }
+}
+
+@Composable
+fun CloseDayDialog(onDismiss: () -> Unit, onConfirm: (cash: Double?, expenses: Double?, note: String) -> Unit) {
+    var cash by remember { mutableStateOf("") }
+    var expenses by remember { mutableStateOf("") }
+    var note by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("إقفال اليوم") },
+        text = {
+            Column {
+                Text("البيانات دي اختيارية، للمطابقة والمرجعية بس.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(value = cash, onValueChange = { cash = it }, label = { Text("الكاش الموجود في الدرج") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(6.dp))
+                OutlinedTextField(value = expenses, onValueChange = { expenses = it }, label = { Text("المصروفات") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(6.dp))
+                OutlinedTextField(value = note, onValueChange = { note = it }, label = { Text("ملاحظة") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            }
+        },
+        confirmButton = { TextButton(onClick = { onConfirm(cash.toDoubleOrNull(), expenses.toDoubleOrNull(), note.trim()) }) { Text("تأكيد الإقفال") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("إلغاء") } }
+    )
 }
 
 @Composable
@@ -479,6 +781,15 @@ fun InvoicesScreen() {
                                 Text(inv.customerName, style = MaterialTheme.typography.bodySmall)
                                 Text(payLabel(inv.paymentMethod), style = MaterialTheme.typography.bodySmall,
                                     color = if (inv.paymentMethod == "credit") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+                                if (inv.paymentMethod == "credit" && inv.creditStatus.isNotBlank()) {
+                                    val statusLabel = when (inv.creditStatus) {
+                                        "paid" -> "مسدّدة بالكامل"
+                                        "partial" -> "مسدّدة جزئيًا — متبقي ${"%.2f".format(inv.remaining)}"
+                                        else -> "غير مسدّدة — متبقي ${"%.2f".format(inv.remaining)}"
+                                    }
+                                    val statusColor = if (inv.creditStatus == "paid") SparkCash else SparkCredit
+                                    Text(statusLabel, style = MaterialTheme.typography.bodySmall, color = statusColor, fontWeight = FontWeight.Bold)
+                                }
                             }
                             Text("%.2f".format(inv.total), fontWeight = FontWeight.Bold)
                         }
@@ -486,10 +797,24 @@ fun InvoicesScreen() {
                             Spacer(Modifier.height(8.dp))
                             HorizontalDivider()
                             Spacer(Modifier.height(8.dp))
+                            if (inv.date.isNotBlank()) Text(inv.date, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Spacer(Modifier.height(4.dp))
                             inv.items.forEach { it ->
                                 Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                                     Text("${it.name} × ${it.qty} ${it.unit}", style = MaterialTheme.typography.bodySmall)
                                     Text("%.2f".format(it.price * it.qty), style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
+                            if (inv.discount > 0) {
+                                Spacer(Modifier.height(4.dp))
+                                HorizontalDivider()
+                                Row(modifier = Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                                    Text("الإجمالي قبل الخصم", style = MaterialTheme.typography.bodySmall)
+                                    Text("%.2f".format(inv.subtotal), style = MaterialTheme.typography.bodySmall)
+                                }
+                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                    Text("الخصم", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                                    Text("-%.2f".format(inv.discount), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                                 }
                             }
                             Spacer(Modifier.height(10.dp))

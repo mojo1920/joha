@@ -1,7 +1,6 @@
 @file:OptIn(ExperimentalMaterial3Api::class)
 package com.spark.companion
 
-package com.spark.companion
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity

@@ -56,20 +56,36 @@ class SparkApiClient(private val context: Context) {
         .readTimeout(10, TimeUnit.SECONDS)
         .build()
 
-    private fun baseUrl(ip: String, port: Int) = "http://$ip:$port"
+    /**
+     * ينظّف عنوان الـIP المُدخل من المستخدم: يشيل "http://" لو موجودة بالغلط،
+     * ويشيل أي منفذ (port) اتكتب معاه غصب داخل نفس الحقل (زي "192.168.1.5:4489")
+     * حتى لا يتكرر المنفذ عند بناء الرابط النهائي ويسبب كراش.
+     */
+    private fun sanitizeIp(rawIp: String): String {
+        var value = rawIp.trim()
+        value = value.removePrefix("http://").removePrefix("https://")
+        val slashIndex = value.indexOf('/')
+        if (slashIndex != -1) value = value.substring(0, slashIndex)
+        val colonIndex = value.indexOf(':')
+        if (colonIndex != -1) value = value.substring(0, colonIndex)
+        return value
+    }
+
+    private fun baseUrl(ip: String, port: Int) = "http://${sanitizeIp(ip)}:$port"
 
     /** يرسل رمز PIN المعروض على شاشة الكمبيوتر مع اسم الجهاز، ويحفظ التوكن محليًا عند النجاح. */
     suspend fun pair(ip: String, port: Int, pin: String, deviceName: String): ApiResult<String> =
         withContext(Dispatchers.IO) {
             try {
+                val cleanIp = sanitizeIp(ip)
                 val body = JSONObject().put("pin", pin).put("deviceName", deviceName)
                     .toString().toRequestBody("application/json".toMediaType())
-                val req = Request.Builder().url("${baseUrl(ip, port)}/api/pair").post(body).build()
+                val req = Request.Builder().url("${baseUrl(cleanIp, port)}/api/pair").post(body).build()
                 client.newCall(req).execute().use { resp ->
                     val json = JSONObject(resp.body?.string() ?: "{}")
                     if (resp.isSuccessful && json.optBoolean("ok")) {
                         val token = json.getString("token")
-                        SessionStore.save(context, ip, port, token)
+                        SessionStore.save(context, cleanIp, port, token)
                         ApiResult.Success(json.optString("shopName", ""))
                     } else {
                         ApiResult.Failure(json.optString("error", "تعذّر الاقتران"))
@@ -77,6 +93,8 @@ class SparkApiClient(private val context: Context) {
                 }
             } catch (e: IOException) {
                 ApiResult.Failure("تعذّر الوصول للكمبيوتر — تأكد إنك على نفس شبكة الواي فاي")
+            } catch (e: IllegalArgumentException) {
+                ApiResult.Failure("عنوان الـIP أو المنفذ غير صحيح، تأكد من كتابة رقم IP فقط بدون رموز إضافية")
             }
         }
 
@@ -95,6 +113,8 @@ class SparkApiClient(private val context: Context) {
             }
         } catch (e: IOException) {
             ApiResult.Failure("تعذّر الوصول للكمبيوتر — تأكد إنك على نفس شبكة الواي فاي")
+        } catch (e: IllegalArgumentException) {
+            ApiResult.Failure("عنوان الـIP أو المنفذ غير صحيح")
         }
     }
 

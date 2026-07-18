@@ -91,7 +91,7 @@ fun PairingScreen(onPaired: () -> Unit) {
     var pin by remember { mutableStateOf("") }
     var deviceName by remember { mutableStateOf(android.os.Build.MODEL ?: "هاتف أندرويد") }
     var loading by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var error: String? by remember { mutableStateOf(null) }
 
     Column(
         modifier = Modifier
@@ -207,8 +207,8 @@ fun DashboardHost(onUnpair: () -> Unit) {
 @Composable
 fun DashboardScreen() {
     val context = androidx.compose.ui.platform.LocalContext.current
-    var summary by remember { mutableStateOf<DashboardSummary?>(null) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var summary: DashboardSummary? by remember { mutableStateOf(null) }
+    var error: String? by remember { mutableStateOf(null) }
 
     LaunchedEffect(Unit) {
         when (val r = SparkApiClient(context).getSummary()) {
@@ -329,8 +329,8 @@ enum class StockFilter { ALL, LOW, OUT }
 @Composable
 fun InventoryScreen() {
     val context = androidx.compose.ui.platform.LocalContext.current
-    var items by remember { mutableStateOf<List<ProductItem>>(emptyList()) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var items: List<ProductItem> by remember { mutableStateOf(emptyList()) }
+    var error: String? by remember { mutableStateOf(null) }
     var query by remember { mutableStateOf("") }
     var stockFilter by remember { mutableStateOf(StockFilter.ALL) }
     var category by remember { mutableStateOf("الكل") }
@@ -419,11 +419,11 @@ fun InventoryScreen() {
 @Composable
 fun InvoicesScreen() {
     val context = androidx.compose.ui.platform.LocalContext.current
-    var invoices by remember { mutableStateOf<List<InvoiceSummaryItem>>(emptyList()) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var invoices: List<InvoiceSummaryItem> by remember { mutableStateOf(emptyList()) }
+    var error: String? by remember { mutableStateOf(null) }
     var query by remember { mutableStateOf("") }
     var paymentFilter by remember { mutableStateOf("الكل") }
-    var expandedId by remember { mutableStateOf<String?>(null) }
+    var expandedId: String? by remember { mutableStateOf(null) }
 
     LaunchedEffect(Unit) {
         when (val r = SparkApiClient(context).getInvoices()) {
@@ -462,7 +462,7 @@ fun InvoicesScreen() {
         LazyColumn(modifier = Modifier.padding(horizontal = 12.dp)) {
             items(filtered) { inv ->
                 val expanded = expandedId == inv.id
-                var pdfState by remember(inv.id) { mutableStateOf<String?>(null) } // null=عادي، "loading"، "done"، أو رسالة خطأ
+                var pdfState: String? by remember(inv.id) { mutableStateOf(null) } // null=عادي، "loading"، "done"، أو رسالة خطأ
                 val scope = rememberCoroutineScope()
                 Card(modifier = Modifier
                     .fillMaxWidth()

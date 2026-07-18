@@ -1,3 +1,8 @@
 <resources>
-    <style name="Theme.SparkCompanion" parent="android:Theme.Material.Light.NoActionBar" />
+    <style name="Theme.SparkCompanion" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">#12161D</item>
+        <item name="android:navigationBarColor">#FFFFFF</item>
+        <item name="android:windowBackground">#F2F3F6</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
 </resources>
